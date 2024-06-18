@@ -1,0 +1,103 @@
+const express = require('express');
+const bodyParser = require('body-parser');
+const nodemailer = require('nodemailer');
+const Imap = require('imap-simple');
+const { simpleParser } = require('mailparser');
+const { MongoClient } = require('mongodb');
+
+const app = express();
+const port = 3001;
+
+app.use(bodyParser.json());
+
+const mongoUri = 'mongodb://localhost:27017';
+let db;
+
+MongoClient.connect(mongoUri, { useUnifiedTopology: true })
+    .then(client => {
+        db = client.db('emailClient');
+        console.log('Connected to MongoDB');
+    })
+    .catch(error => console.error(error));
+
+const imapConfig = {
+    imap: {
+        user: 'your-email@example.com',
+        password: 'your-password',
+        host: 'imap.example.com',
+        port: 993,
+        tls: true,
+        authTimeout: 3000,
+    },
+};
+
+const fetchEmails = async (mailbox) => {
+    const connection = await Imap.connect(imapConfig);
+    await connection.openBox(mailbox);
+    const results = await connection.search(['ALL'], {
+        bodies: ['HEADER', 'TEXT'],
+        markSeen: false,
+    });
+    const emails = await Promise.all(results.map(async (res) => {
+        const parsed = await simpleParser(res.parts.find(part => part.which === 'TEXT').body);
+        return {
+            from: parsed.from.text,
+            to: parsed.to.text,
+            subject: parsed.subject,
+            date: parsed.date,
+            text: parsed.text,
+            html: parsed.html,
+            uid: res.attributes.uid,
+            flags: res.attributes.flags,
+        };
+    }));
+    connection.end();
+    return emails;
+};
+
+app.post('/send', async (req, res) => {
+    const { to, subject, text } = req.body;
+
+    const transporter = nodemailer.createTransport({
+        host: 'smtp.example.com',
+        port: 587,
+        secure: false,
+        auth: {
+            user: 'your-email@example.com',
+            pass: 'your-password',
+        },
+    });
+
+    try {
+        await transporter.sendMail({ from: 'your-email@example.com', to, subject, text });
+        res.status(200).send('Email sent');
+    } catch (error) {
+        res.status(500).send(error.toString());
+    }
+});
+
+app.get('/emails/:mailbox', async (req, res) => {
+    try {
+        const emails = await fetchEmails(req.params.mailbox);
+        res.status(200).json(emails);
+    } catch (error) {
+        res.status(500).send(error.toString());
+    }
+});
+
+app.post('/emails/mark-seen', async (req, res) => {
+    const { uid } = req.body;
+    try {
+        const connection = await Imap.connect(imapConfig);
+        await connection.openBox('INBOX');
+        await connection.addFlags(uid, '\\Seen');
+        connection.end();
+        res.status(200).send('Email marked as seen');
+    } catch (error) {
+        res.status(500).send(error.toString());
+    }
+});
+
+app.listen(port, () => {
+    console.log(`Server is running on http://localhost:${port}`);
+});
